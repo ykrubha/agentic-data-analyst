@@ -6,11 +6,11 @@ import json
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .llm import LLMError, LLMProvider
 from .sql_guard import ReadOnlyDatabase
-from .tools import TOOL_SCHEMAS, ToolExecutor
+from .tools import FINAL_ANSWER_ONLY, TOOL_SCHEMAS, ToolExecutor
 
 SYSTEM_PROMPT = """You are a careful data analyst working with a SQLite database through tools.
 
@@ -33,12 +33,45 @@ in assumptions.
 """
 
 
+def strip_thinking(text: str) -> str:
+    """Drop the reasoning some local models put before a closing think tag."""
+    return text.rsplit("</think>", 1)[-1].strip()
+
+
+def recover_final_answer(text: str) -> dict | None:
+    """Find a final_answer that a model wrote as plain JSON instead of a tool call.
+
+    Small local models often do this. Only text after any thinking is searched, because
+    drafts inside the reasoning aren't the model's answer. The last complete match wins.
+    """
+    body = strip_thinking(text)
+    decoder = json.JSONDecoder()
+    found = None
+    position = body.find("{")
+    while position != -1:
+        try:
+            parsed, length = decoder.raw_decode(body, position)
+        except json.JSONDecodeError:
+            position = body.find("{", position + 1)
+            continue
+        if isinstance(parsed, dict):
+            # Some models wrap it as {"name": "final_answer", "arguments": {...}}.
+            arguments = parsed.get("arguments") if parsed.get("name") == "final_answer" else parsed
+            if (isinstance(arguments, dict)
+                    and isinstance(arguments.get("answer"), str)
+                    and isinstance(arguments.get("answerable"), bool)):
+                found = arguments
+        position = body.find("{", position + length)
+    return found
+
+
 @dataclass
 class AgentConfig:
     max_steps: int = 12
     max_tool_errors: int = 5
     max_total_tokens: int = 60_000
     max_seconds: float = 180.0
+    max_text_turns: int = 3
 
 
 @dataclass
@@ -54,7 +87,8 @@ class TraceEvent:
 @dataclass
 class AgentResult:
     question: str
-    status: str  # answered | max_steps | too_many_errors | token_budget | timeout | llm_error
+    # answered | max_steps | too_many_errors | token_budget | timeout | llm_error | no_final_answer
+    status: str
     answer: str | None = None
     value: Any = None
     answerable: bool | None = None
@@ -62,6 +96,7 @@ class AgentResult:
     steps: int = 0
     tool_errors: int = 0
     recovered_errors: int = 0
+    answer_recovered_from_text: bool = False
     input_tokens: int = 0
     output_tokens: int = 0
     seconds: float = 0.0
@@ -86,13 +121,16 @@ class DataAnalystAgent:
         self.config = config or AgentConfig()
         self.output_dir = Path(output_dir) if output_dir else None
 
-    def run(self, question: str) -> AgentResult:
+    def run(self, question: str, on_event: Callable[[str], None] | None = None) -> AgentResult:
+        """Answer one question. ``on_event`` receives a line of progress as each step happens."""
+        emit = on_event or (lambda _line: None)
         config = self.config
         tools = ToolExecutor(self.db, output_dir=self.output_dir)
         result = AgentResult(question=question, status="max_steps")
         messages: list[dict] = [{"role": "user", "content": question}]
         started = time.monotonic()
         error_pending = False
+        text_turns = 0
 
         for step in range(1, config.max_steps + 1):
             result.steps = step
@@ -103,12 +141,19 @@ class DataAnalystAgent:
                 result.status = "token_budget"
                 break
 
+            emit(f"[{step}] waiting for the model...")
+            model_started = time.monotonic()
             try:
-                response = self.provider.complete(SYSTEM_PROMPT, messages, TOOL_SCHEMAS)
+                # After a reply with no tool call, offer only final_answer. Small models
+                # often state the answer in prose and need this to finish properly.
+                offered = FINAL_ANSWER_ONLY if text_turns else TOOL_SCHEMAS
+                response = self.provider.complete(SYSTEM_PROMPT, messages, offered)
             except LLMError as err:
                 result.status = "llm_error"
                 result.answer = str(err)
                 break
+            emit(f"[{step}] model replied in {time.monotonic() - model_started:.1f}s "
+                 f"({response.output_tokens} output tokens)")
             result.input_tokens += response.input_tokens
             result.output_tokens += response.output_tokens
             messages.append(
@@ -116,9 +161,25 @@ class DataAnalystAgent:
             )
 
             if not response.tool_calls:
-                messages.append({"role": "user", "content":
-                                 "Call a tool. To finish, call final_answer."})
+                recovered = recover_final_answer(response.text)
+                if recovered is not None and self._finish(result, recovered):
+                    result.answer_recovered_from_text = True
+                    emit(f"[{step}] final_answer recovered from text: "
+                         f"{json.dumps(recovered, default=str)[:400]}")
+                    break
+                text_turns += 1
+                emit(f"[{step}] model replied with text and no tool call: {response.text[:300]!r}")
+                if text_turns >= config.max_text_turns:
+                    # Keep the prose for the reader, but it isn't a structured answer to score.
+                    result.status = "no_final_answer"
+                    result.answer = strip_thinking(response.text)
+                    break
+                messages.append({"role": "user", "content": (
+                    "That reply was not recorded. You must call the final_answer tool now, with "
+                    "answer, value and answerable, using the results you already have."
+                )})
                 continue
+            text_turns = 0
 
             finished = False
             step_had_error = False
@@ -126,6 +187,7 @@ class DataAnalystAgent:
                 if call.name == "final_answer":
                     finished = self._finish(result, call.arguments)
                     if finished:
+                        emit(f"[{step}] final_answer {json.dumps(call.arguments, default=str)[:400]}")
                         # The loop ends here, so no further results need sending.
                         break
                     outcome_text, outcome_error = "final_answer needs answer, value and answerable.", True
@@ -137,6 +199,7 @@ class DataAnalystAgent:
                         step, call.name, call.arguments, outcome_text[:2000],
                         outcome_error, round(time.monotonic() - tic, 3),
                     ))
+                    emit(format_event(result.trace[-1]))
                 step_had_error = step_had_error or outcome_error
                 if outcome_error:
                     result.tool_errors += 1
@@ -171,10 +234,7 @@ class DataAnalystAgent:
         return True
 
 
-def format_trace(result: AgentResult) -> str:
-    lines = []
-    for event in result.trace:
-        marker = "ERROR" if event.is_error else "ok"
-        args = json.dumps(event.arguments)[:400]
-        lines.append(f"[{event.step}] {event.tool} {args}\n    -> {marker}: {event.result[:300]}")
-    return "\n".join(lines)
+def format_event(event: TraceEvent) -> str:
+    marker = "ERROR" if event.is_error else "ok"
+    args = json.dumps(event.arguments)[:400]
+    return f"[{event.step}] {event.tool} {args}\n    -> {marker}: {event.result[:300]}"

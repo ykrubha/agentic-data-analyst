@@ -70,6 +70,8 @@ TOOL_SCHEMAS = [
             "properties": {
                 "answer": {"type": "string", "description": "Plain-language answer with the key numbers."},
                 "value": {
+                    "type": ["string", "number", "array", "null"],
+                    "items": {"type": ["string", "number"]},
                     "description": (
                         "The machine-readable result: a number, a string, or a list of them, in "
                         "the order the question asks for. Use null if the question cannot be "
@@ -91,6 +93,8 @@ TOOL_SCHEMAS = [
         },
     },
 ]
+
+FINAL_ANSWER_ONLY = [t for t in TOOL_SCHEMAS if t["name"] == "final_answer"]
 
 
 @dataclass

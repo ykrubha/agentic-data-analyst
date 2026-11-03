@@ -12,7 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -41,7 +41,9 @@ def evaluate(
             "id": question.id, "category": question.category, "question": question.text,
             "expected": expected, "value": result.value, "correct": correct, "reason": reason,
             "status": result.status, "steps": result.steps, "tool_errors": result.tool_errors,
-            "recovered_errors": result.recovered_errors, "input_tokens": result.input_tokens,
+            "recovered_errors": result.recovered_errors,
+            "answer_recovered_from_text": result.answer_recovered_from_text,
+            "input_tokens": result.input_tokens,
             "output_tokens": result.output_tokens, "seconds": result.seconds,
             "answer": result.answer, "sql": result.sql,
             "trace": [vars(event) for event in result.trace],
@@ -70,6 +72,8 @@ def summarize(rows: list[dict], model: str) -> dict:
     errors = sum(r["tool_errors"] for r in rows)
     return {
         "model": model,
+        "statuses": dict(Counter(r["status"] for r in rows)),
+        "answers_recovered_from_text": sum(r["answer_recovered_from_text"] for r in rows),
         "run_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "overall": stats(rows),
         "by_category": {name: stats(items) for name, items in groups.items()},
@@ -95,6 +99,10 @@ def to_markdown(summary: dict) -> str:
         "",
         f"Tool errors: {summary['tool_errors']} across {summary['questions_with_tool_error']} questions. "
         f"{summary['correct_after_tool_error']} of those questions still ended correct.",
+        "",
+        f"How runs ended: {summary['statuses']}. "
+        f"{summary['answers_recovered_from_text']} answers were written as JSON text and recovered, "
+        "not sent as native tool calls.",
     ]
     return "\n".join(lines) + "\n"
 
@@ -106,6 +114,8 @@ def main() -> int:
     parser.add_argument("--database", default="data/chinook.sqlite")
     parser.add_argument("--out", default="results")
     parser.add_argument("--only", default=None, help="Comma-separated question ids.")
+    parser.add_argument("--reasoning-effort", default=None,
+                        help="openai provider only. Use none to turn off thinking on local models.")
     parser.add_argument("--max-seconds", type=float, default=180.0,
                         help="Time limit per question. Raise this for slower local models.")
     args = parser.parse_args()
@@ -116,7 +126,7 @@ def main() -> int:
         questions = [q for q in QUESTIONS if q.id in wanted]
 
     started = time.monotonic()
-    summary = evaluate(make_provider(args.provider, args.model), args.database, questions,
+    summary = evaluate(make_provider(args.provider, args.model, args.reasoning_effort), args.database, questions,
                        config=AgentConfig(max_seconds=args.max_seconds))
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)

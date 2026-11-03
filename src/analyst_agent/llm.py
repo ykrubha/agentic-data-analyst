@@ -150,8 +150,10 @@ class OpenAICompatibleProvider:
         base_url: str | None = None,
         max_tokens: int = 2048,
         client: httpx.Client | None = None,
+        reasoning_effort: str | None = None,
     ):
         self.model = model
+        self.reasoning_effort = reasoning_effort
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         base = base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
         self.url = base.rstrip("/") + "/chat/completions"
@@ -165,6 +167,8 @@ class OpenAICompatibleProvider:
             "messages": [{"role": "system", "content": system}, *self._to_wire(messages)],
             "tools": [{"type": "function", "function": t} for t in tools],
         }
+        if self.reasoning_effort:
+            body["reasoning_effort"] = self.reasoning_effort
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         data = _post_with_retry(self.client, self.url, headers, body)
         message = data["choices"][0]["message"]
@@ -207,11 +211,13 @@ class OpenAICompatibleProvider:
         return wire
 
 
-def make_provider(name: str, model: str | None = None) -> LLMProvider:
+def make_provider(
+    name: str, model: str | None = None, reasoning_effort: str | None = None
+) -> LLMProvider:
     if name == "anthropic":
         return AnthropicProvider(model=model or "claude-sonnet-5-5")
     if name == "openai":
         if not model:
             raise LLMError("--model is required for the openai provider.")
-        return OpenAICompatibleProvider(model=model)
+        return OpenAICompatibleProvider(model=model, reasoning_effort=reasoning_effort)
     raise LLMError(f"Unknown provider {name!r}. Use anthropic or openai.")

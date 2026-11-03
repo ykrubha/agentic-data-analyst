@@ -84,6 +84,21 @@ def test_openai_request_and_response_format():
     assert response.input_tokens == 3
 
 
+def test_openai_reasoning_effort_is_only_sent_when_set():
+    bodies = []
+
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    OpenAICompatibleProvider(model="m", base_url="http://x/v1", client=client(handler),
+                             reasoning_effort="none").complete("s", HISTORY, [])
+    OpenAICompatibleProvider(model="m", base_url="http://x/v1", client=client(handler)
+                             ).complete("s", HISTORY, [])
+    assert bodies[0]["reasoning_effort"] == "none"
+    assert "reasoning_effort" not in bodies[1]
+
+
 def test_openai_malformed_arguments_do_not_crash():
     def handler(request):
         return httpx.Response(200, json={"choices": [{"message": {"tool_calls": [

@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from analyst_agent.agent import AgentConfig, DataAnalystAgent
+from analyst_agent.agent import AgentConfig, DataAnalystAgent, recover_final_answer
 from fakes import ScriptedProvider, final
 
 DB = "data/chinook.sqlite"
@@ -23,6 +23,16 @@ def test_happy_path_sql_then_answer():
     assert result.value == 59
     assert result.steps == 2
     assert result.sql == ["SELECT COUNT(*) n FROM Customer"]
+
+
+def test_progress_is_reported_as_steps_happen():
+    lines = []
+    provider = ScriptedProvider([[("list_tables", {})], final(1)])
+    DataAnalystAgent(provider, DB).run("q", on_event=lines.append)
+    assert lines[0] == "[1] waiting for the model..."
+    assert any("model replied" in line for line in lines)
+    assert any(line.startswith("[1] list_tables") for line in lines)
+    assert lines[-1].startswith("[2] final_answer")
 
 
 def test_sql_error_goes_back_to_model_and_recovers():
@@ -91,6 +101,69 @@ def test_plain_text_turn_is_nudged_not_treated_as_answer():
     result, provider = run(["I think it is 59.", final(59)])
     assert result.status == "answered"
     assert provider.calls[1][-1]["role"] == "user"
+
+
+def test_text_reply_narrows_tools_to_final_answer_then_restores_them():
+    result, provider = run([
+        "The answer is Rock.",
+        final("Rock"),
+    ])
+    assert result.status == "answered"
+    assert "run_sql" in provider.tools_offered[0]
+    assert provider.tools_offered[1] == ["final_answer"]
+
+    _, provider = run(["thinking", [("list_tables", {})], final(1)])
+    assert provider.tools_offered[2] != ["final_answer"]
+
+
+JSON_ANSWER = '{"answer": "Rock", "answerable": true, "value": "Rock"}'
+
+
+def test_final_answer_written_as_json_text_is_recovered_and_flagged():
+    result, provider = run([f"Reasoning here.\n</think>\n\n{JSON_ANSWER}"])
+    assert result.status == "answered"
+    assert result.value == "Rock"
+    assert result.answer_recovered_from_text is True
+    assert len(provider.calls) == 1
+
+
+def test_native_final_answer_is_not_flagged_as_recovered():
+    result, _ = run([final(1)])
+    assert result.answer_recovered_from_text is False
+
+
+@pytest.mark.parametrize("text,value", [
+    (JSON_ANSWER, "Rock"),
+    (f"Here you go: {JSON_ANSWER} Done.", "Rock"),
+    (f'{{"name": "final_answer", "arguments": {JSON_ANSWER}}}', "Rock"),
+    ('{"answer": "a", "answerable": true, "value": 1} {"answer": "b", "answerable": true, "value": 2}', 2),
+    ('{"answer": "x {y}", "answerable": false, "value": null}', None),
+])
+def test_recover_final_answer_accepts(text, value):
+    assert recover_final_answer(text)["value"] == value
+
+
+@pytest.mark.parametrize("text", [
+    "The answer is Rock.",
+    "",
+    "{not json",
+    '{"answer": "Rock"}',
+    '{"answer": "Rock", "answerable": "yes"}',
+    '{"answer": 5, "answerable": true}',
+    '{"name": "run_sql", "arguments": {"query": "SELECT 1"}}',
+    # A draft inside the reasoning isn't an answer.
+    f"Maybe {JSON_ANSWER} would work.</think>\nStill checking.",
+])
+def test_recover_final_answer_rejects(text):
+    assert recover_final_answer(text) is None
+
+
+def test_repeated_text_replies_stop_early_and_keep_the_text():
+    result, provider = run(["It is Rock."] * 10, config=AgentConfig(max_text_turns=3))
+    assert result.status == "no_final_answer"
+    assert result.answer == "It is Rock."
+    assert result.value is None
+    assert len(provider.calls) == 3
 
 
 def test_unknown_tool_and_bad_args_are_reported():

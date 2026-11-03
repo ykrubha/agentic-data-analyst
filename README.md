@@ -29,6 +29,7 @@ Design choices:
 - **Tool errors are model input.** A failed query comes back as an `is_error` result, so the model corrects itself instead of the run crashing.
 - **SQL results flow into Python.** `run_sql` saves a DataFrame under a name, and `run_python` receives it as a global, so full results don't have to pass through the prompt.
 - **Answers are structured.** `final_answer` carries a machine-readable `value`, an `answerable` flag and stated assumptions, so scoring doesn't rely on parsing prose.
+- **Small models get a way to finish.** Local models often state the answer in prose or write `final_answer` as plain JSON. The agent then offers only `final_answer`, accepts valid JSON from the text, and flags those answers in the results.
 - **Every run has budgets.** Steps, tool errors, tokens and wall-clock time are all capped, and the run's status records which limit stopped it.
 - **Providers are swappable.** One neutral message format is translated by small adapters, so the loop contains no provider-specific logic.
 

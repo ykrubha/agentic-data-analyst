@@ -17,9 +17,11 @@ class ScriptedProvider:
     def __init__(self, turns: list[list[tuple[str, dict]] | str]):
         self.turns = list(turns)
         self.calls: list[list[dict]] = []
+        self.tools_offered: list[list[str]] = []
 
     def complete(self, system, messages, tools) -> LLMResponse:
         self.calls.append(list(messages))
+        self.tools_offered.append([t["name"] for t in tools])
         if not self.turns:
             return LLMResponse(text="out of script")
         turn = self.turns.pop(0)
