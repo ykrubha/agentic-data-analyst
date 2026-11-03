@@ -50,11 +50,19 @@ class LLMProvider(Protocol):
 RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 504, 529}
 
 
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    try:
+        return float(response.headers["retry-after"])
+    except (KeyError, ValueError):
+        return None
+
+
 def _post_with_retry(
     client: httpx.Client, url: str, headers: dict, body: dict,
-    max_retries: int = 4, base_delay_s: float = 1.5,
+    max_retries: int = 6, base_delay_s: float = 2.0, max_delay_s: float = 60.0,
 ) -> dict:
     last_error = ""
+    retry_after = None
     for attempt in range(max_retries + 1):
         try:
             response = client.post(url, headers=headers, json=body)
@@ -66,8 +74,11 @@ def _post_with_retry(
             last_error = f"HTTP {response.status_code}: {response.text[:400]}"
             if response.status_code not in RETRYABLE_STATUS:
                 raise LLMError(last_error)
+            retry_after = _retry_after_seconds(response)
         if attempt < max_retries:
-            time.sleep(base_delay_s * 2**attempt)
+            delay = min(base_delay_s * 2**attempt, max_delay_s)
+            time.sleep(max(delay, retry_after or 0.0))
+            retry_after = None
     raise LLMError(f"Gave up after {max_retries + 1} attempts. Last error: {last_error}")
 
 
@@ -214,6 +225,23 @@ class OpenAICompatibleProvider:
                 wire.append({"role": "tool", "tool_call_id": message["tool_call_id"],
                              "content": content})
         return wire
+
+
+class PacedProvider:
+    """Wraps a provider to leave a minimum gap between calls, for free-tier rate limits."""
+
+    def __init__(self, provider: LLMProvider, min_interval_s: float):
+        self.provider = provider
+        self.model = provider.model
+        self.min_interval_s = min_interval_s
+        self._last_call = 0.0
+
+    def complete(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
+        wait = self.min_interval_s - (time.monotonic() - self._last_call)
+        if wait > 0:
+            time.sleep(wait)
+        self._last_call = time.monotonic()
+        return self.provider.complete(system, messages, tools)
 
 
 def make_provider(

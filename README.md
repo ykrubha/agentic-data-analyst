@@ -50,36 +50,47 @@ Design choices:
 
 The attack list is my own, so this is a regression suite rather than a security audit. The one parser miss is why the second layer exists. Both the attacks and the results are in [`eval/guard_benchmark.py`](eval/guard_benchmark.py) and [`results/guard_benchmark.json`](results/guard_benchmark.json).
 
-### Agent accuracy (run this with a model of your choice)
+### Agent accuracy
 
-**This benchmark has not been run against a live model yet, so no accuracy number is claimed.** The harness and adapters are tested with scripted responses and a fake HTTP server, which proves the plumbing but not model performance.
+**37 of 38 questions correct (97%) in one run with `gemini-3.5-flash-lite`** through its OpenAI-compatible API.
+
+| Category | What it tests | Correct | Accuracy | Mean steps | Mean tokens |
+|---|---|---:|---:|---:|---:|
+| aggregation | Single-table counts, sums and filters | 8/8 | 100% | 5.25 | 7,608 |
+| join | Multi-table joins, anti-joins | 10/10 | 100% | 5.9 | 10,068 |
+| multi_step | CTEs, window functions, derived metrics | 8/8 | 100% | 7.12 | 15,658 |
+| python | Regression, correlation, Gini, growth rates | 5/6 | 83% | 8.0 | 18,467 |
+| refusal | Missing data and write requests that must be declined | 6/6 | 100% | 6.83 | 13,606 |
+| **Overall** | | **37/38** | **97%** | 6.5 | 12,612 |
+
+- **Self-correction:** tools returned 20 errors across 12 questions, and 11 of those 12 questions still ended correct.
+- **The miss:** `py04` (revenue share of the top 10% of customers) used all 12 steps without submitting an answer, so it counts as wrong.
+- **Answer format:** all 37 finished runs used native `final_answer` tool calls, with none recovered from text.
+
+How to read this score:
+
+- **It's one run on a small, hand-written benchmark.** The questions were written for this database and share its schema, so it doesn't generalize the way a public text-to-SQL benchmark such as Spider or BIRD would.
+- **Development touched the benchmark's subject matter.** "Which genre generated the most revenue?" was the test question while fixing the agent, and it closely matches `join03`. The other questions weren't used for tuning, and `py04` was left as a failure.
+- **Scoring rules:** expected answers are computed from gold SQL at run time, and numbers must match within 1%. Refusing an answerable question counts as wrong, and so does answering one that should be refused.
+
+Full traces are in [`results/benchmark.json`](results/benchmark.json), and the generated summary is in [`results/benchmark.md`](results/benchmark.md).
+
+### Run it yourself
 
 ```bash
+# Gemini's free tier, with pacing to respect its rate limits
+export OPENAI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
+export OPENAI_API_KEY=...
+python -m eval.run_eval --provider openai --model gemini-3.5-flash-lite --min-seconds-between-calls 5 --max-seconds 600
+
+# Claude
 export ANTHROPIC_API_KEY=...
 python -m eval.run_eval --provider anthropic --model claude-sonnet-5-5
 ```
 
-Or run it for free on your own machine with [Ollama](https://ollama.com), using a model that supports tool calling:
+Finished questions are saved as the run goes, so add `--resume` to continue after an interruption. Runs stop after repeated provider errors, and no score is written while any provider errors remain, so outages can't count as wrong answers. Use one model for each score, because `--resume` doesn't check for a model change.
 
-```bash
-ollama pull qwen3:8b
-printf 'FROM qwen3:8b\nPARAMETER num_ctx 16384\n' > /tmp/Modelfile
-ollama create analyst-model -f /tmp/Modelfile
-export OPENAI_BASE_URL=http://localhost:11434/v1
-python -m eval.run_eval --provider openai --model analyst-model --max-seconds 600
-```
-
-Either way, this writes `results/benchmark.md` with the table below filled in, and `results/benchmark.json` with a full trace per question. The table records which model produced the scores, and a small local model will likely score lower than a large hosted one.
-
-| Category | Questions | What it tests |
-|---|---:|---|
-| aggregation | 8 | Single-table counts, sums and filters |
-| join | 10 | Multi-table joins, anti-joins |
-| multi_step | 8 | CTEs, window functions, derived metrics |
-| python | 6 | Regression, correlation, Gini, growth rates |
-| refusal | 6 | Missing data and write requests that must be declined |
-
-Expected answers are computed from gold SQL at run time. Numbers must match within 1%. Refusing an answerable question counts as wrong, and so does answering one that should be refused. Questions are written by hand for this database, so the score shows how the agent does on this benchmark and doesn't generalize the way a public text-to-SQL benchmark would.
+Local models also work through Ollama. A one-question test with `qwen3:4b` on an 8 GB Mac answered correctly but took about 5 minutes, so the full benchmark wasn't run there. The Claude path is covered by adapter tests with a fake server, but it hasn't been run against the live API.
 
 ## Quick start
 

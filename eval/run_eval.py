@@ -17,10 +17,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from analyst_agent.agent import AgentConfig, DataAnalystAgent
-from analyst_agent.llm import LLMProvider, make_provider
+from analyst_agent.llm import LLMProvider, PacedProvider, make_provider
 
 from .questions import QUESTIONS, Question
 from .scoring import gold_answer, score
+
+
+class BenchmarkInterrupted(RuntimeError):
+    """The provider kept failing, so the run stopped before producing a misleading score."""
+
+
+def load_progress(path: Path | None) -> dict[str, dict]:
+    """Finished questions from an earlier run. Provider failures are left out to be retried."""
+    if path is None or not path.exists():
+        return {}
+    rows = (json.loads(line) for line in path.read_text().splitlines() if line.strip())
+    return {row["id"]: row for row in rows if row["status"] != "llm_error"}
 
 
 def evaluate(
@@ -29,15 +41,29 @@ def evaluate(
     questions: list[Question] | None = None,
     config: AgentConfig | None = None,
     verbose: bool = True,
+    progress_path: Path | None = None,
+    resume: bool = False,
+    max_consecutive_llm_errors: int = 3,
 ) -> dict:
     questions = questions if questions is not None else QUESTIONS
     agent = DataAnalystAgent(provider, database, config=config)
+    done = load_progress(progress_path) if resume else {}
+    if progress_path is not None:
+        progress_path.parent.mkdir(parents=True, exist_ok=True)
+        # Rewrite without earlier provider failures, so they can't linger in the results.
+        progress_path.write_text("".join(json.dumps(r, default=str) + "\n" for r in done.values()))
     rows = []
+    consecutive_errors = 0
     for question in questions:
+        if question.id in done:
+            rows.append(done[question.id])
+            if verbose:
+                print(f"SKIP {question.id:<6} already finished", flush=True)
+            continue
         expected = gold_answer(question, database)
         result = agent.run(question.text)
         correct, reason = score(question, result, expected)
-        rows.append({
+        row = {
             "id": question.id, "category": question.category, "question": question.text,
             "expected": expected, "value": result.value, "correct": correct, "reason": reason,
             "status": result.status, "steps": result.steps, "tool_errors": result.tool_errors,
@@ -47,7 +73,23 @@ def evaluate(
             "output_tokens": result.output_tokens, "seconds": result.seconds,
             "answer": result.answer, "sql": result.sql,
             "trace": [vars(event) for event in result.trace],
-        })
+        }
+        if result.status == "llm_error":
+            consecutive_errors += 1
+            if verbose:
+                print(f"ERROR {question.id:<6} {(result.answer or '')[:300]}", flush=True)
+            if consecutive_errors >= max_consecutive_llm_errors:
+                raise BenchmarkInterrupted(
+                    f"The model provider failed on {consecutive_errors} questions in a row. "
+                    f"Last error: {(result.answer or '')[:300]}"
+                )
+            rows.append(row)
+            continue
+        consecutive_errors = 0
+        rows.append(row)
+        if progress_path is not None:
+            with progress_path.open("a") as handle:
+                handle.write(json.dumps(row, default=str) + "\n")
         if verbose:
             print(f"{'PASS' if correct else 'FAIL'} {question.id:<6} {reason[:90]}", flush=True)
     return summarize(rows, getattr(provider, "model", "unknown"))
@@ -116,6 +158,10 @@ def main() -> int:
     parser.add_argument("--only", default=None, help="Comma-separated question ids.")
     parser.add_argument("--reasoning-effort", default=None,
                         help="openai provider only. Use none to turn off thinking on local models.")
+    parser.add_argument("--min-seconds-between-calls", type=float, default=0.0,
+                        help="Pace requests to stay under free-tier rate limits.")
+    parser.add_argument("--resume", action="store_true",
+                        help="Keep finished questions from the last run and retry the rest.")
     parser.add_argument("--max-seconds", type=float, default=180.0,
                         help="Time limit per question. Raise this for slower local models.")
     args = parser.parse_args()
@@ -126,10 +172,24 @@ def main() -> int:
         questions = [q for q in QUESTIONS if q.id in wanted]
 
     started = time.monotonic()
-    summary = evaluate(make_provider(args.provider, args.model, args.reasoning_effort), args.database, questions,
-                       config=AgentConfig(max_seconds=args.max_seconds))
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    provider = make_provider(args.provider, args.model, args.reasoning_effort)
+    if args.min_seconds_between_calls > 0:
+        provider = PacedProvider(provider, args.min_seconds_between_calls)
+    try:
+        summary = evaluate(provider, args.database, questions,
+                           config=AgentConfig(max_seconds=args.max_seconds),
+                           progress_path=out / "benchmark_progress.jsonl", resume=args.resume)
+    except BenchmarkInterrupted as err:
+        print(f"\nStopped: {err}\nProgress is saved, and no score was written. "
+              "Wait a while, then run the same command with --resume.")
+        return 1
+    errors = sum(r["status"] == "llm_error" for r in summary["rows"])
+    if errors:
+        print(f"\n{errors} questions hit provider errors, so no score was written. "
+              "Run the same command with --resume to retry them.")
+        return 1
     (out / "benchmark.json").write_text(json.dumps(summary, indent=2, default=str))
     (out / "benchmark.md").write_text(to_markdown(summary))
     print("\n" + to_markdown(summary))

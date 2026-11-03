@@ -4,7 +4,8 @@ import pytest
 
 from analyst_agent.agent import AgentResult
 from eval.questions import QUESTIONS
-from eval.run_eval import evaluate, to_markdown
+from analyst_agent.llm import LLMError, LLMResponse, PacedProvider, ToolCall
+from eval.run_eval import BenchmarkInterrupted, evaluate, load_progress, to_markdown
 from eval.scoring import gold_answer, score, values_match
 from fakes import ScriptedProvider, final
 
@@ -91,3 +92,64 @@ def test_refusal_scoring_goes_both_ways():
 def test_unfinished_run_scores_wrong():
     question = next(q for q in QUESTIONS if q.kind == "scalar")
     assert score(question, AgentResult(question="q", status="max_steps", value=59), 59)[0] is False
+
+
+class FlakyProvider:
+    """Answers correctly, except that the listed attempts raise a provider error."""
+
+    model = "flaky"
+
+    def __init__(self, failing_attempts):
+        self.failing_attempts = set(failing_attempts)
+        self.attempt = 0
+
+    def complete(self, system, messages, tools):
+        self.attempt += 1
+        if self.attempt in self.failing_attempts:
+            raise LLMError("HTTP 503: busy")
+        return LLMResponse(tool_calls=[ToolCall(
+            "c", "final_answer", {"answer": "x", "value": 59, "answerable": True})])
+
+
+def test_repeated_provider_errors_stop_the_run_and_resume_retries_them(tmp_path):
+    questions = [q for q in QUESTIONS if q.kind == "scalar"][:5]
+    progress = tmp_path / "progress.jsonl"
+
+    with pytest.raises(BenchmarkInterrupted, match="503"):
+        evaluate(FlakyProvider({2, 3, 4}), DB, questions, verbose=False, progress_path=progress)
+    assert list(load_progress(progress)) == [questions[0].id]
+
+    resumed = FlakyProvider(set())
+    summary = evaluate(resumed, DB, questions, verbose=False, progress_path=progress, resume=True)
+    assert resumed.attempt == 4
+    assert [r["id"] for r in summary["rows"]] == [q.id for q in questions]
+    assert all(r["status"] == "answered" for r in summary["rows"])
+
+
+def test_a_single_provider_error_is_not_saved_as_finished(tmp_path):
+    questions = [q for q in QUESTIONS if q.kind == "scalar"][:3]
+    progress = tmp_path / "progress.jsonl"
+    summary = evaluate(FlakyProvider({2}), DB, questions, verbose=False, progress_path=progress)
+    assert [r["status"] for r in summary["rows"]].count("llm_error") == 1
+    assert questions[1].id not in load_progress(progress)
+
+
+def test_fresh_run_clears_old_progress(tmp_path):
+    questions = [q for q in QUESTIONS if q.kind == "scalar"][:2]
+    progress = tmp_path / "progress.jsonl"
+    evaluate(FlakyProvider(set()), DB, questions[:1], verbose=False, progress_path=progress)
+    provider = FlakyProvider(set())
+    evaluate(provider, DB, questions, verbose=False, progress_path=progress)
+    assert provider.attempt == 2
+
+
+def test_paced_provider_waits_between_calls(monkeypatch):
+    import analyst_agent.llm as llm
+
+    sleeps = []
+    monkeypatch.setattr(llm.time, "sleep", sleeps.append)
+    paced = PacedProvider(FlakyProvider(set()), 5.0)
+    paced.complete("s", [], [])
+    paced.complete("s", [], [])
+    assert paced.model == "flaky"
+    assert len(sleeps) == 1 and 4.9 < sleeps[0] <= 5.0

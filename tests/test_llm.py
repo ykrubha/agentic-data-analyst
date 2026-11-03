@@ -149,6 +149,22 @@ def test_retries_overload_then_succeeds(monkeypatch):
     assert len(attempts) == 3
 
 
+def test_retry_after_header_sets_the_minimum_wait(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(llm.time, "sleep", sleeps.append)
+    attempts = []
+
+    def handler(request):
+        attempts.append(1)
+        if len(attempts) == 1:
+            return httpx.Response(429, headers={"retry-after": "37"}, text="slow down")
+        return httpx.Response(200, json={"content": [{"type": "text", "text": "ok"}], "usage": {}})
+
+    AnthropicProvider(model="m", api_key="k", client=client(handler)).complete(
+        "s", [{"role": "user", "content": "q"}], [])
+    assert sleeps == [37.0]
+
+
 def test_does_not_retry_bad_request(monkeypatch):
     monkeypatch.setattr(llm.time, "sleep", lambda _: None)
     attempts = []
