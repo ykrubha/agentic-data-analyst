@@ -4,7 +4,8 @@ Layers:
 * A static AST check allows only analysis imports and blocks dunder access,
   ``eval``/``exec``/``open`` and similar.
 * The code runs in a child process in an empty working directory with a clean
-  environment (no API keys) and rlimits on CPU, memory, file size and processes.
+  environment (no API keys) and rlimits on CPU, memory and file size. The memory
+  limit relies on RLIMIT_AS, which only Linux enforces. On macOS it has no effect.
 
 This is defence in depth for a trusted-operator tool, not a security boundary
 against a determined attacker. Python static checks can be bypassed, so a
@@ -80,6 +81,58 @@ def _check_import(name: str) -> None:
         )
 
 
+_SKIP_FONT_PROFILER = """\
+import subprocess as _subprocess
+_check_output = _subprocess.check_output
+def _skip_system_profiler(command, *args, **kwargs):
+    # On macOS matplotlib runs system_profiler to list fonts. It is slow and can return
+    # output matplotlib can't parse. An OSError makes matplotlib use its font folders instead.
+    if command and command[0] == "system_profiler":
+        raise OSError("system_profiler skipped")
+    return _check_output(command, *args, **kwargs)
+_subprocess.check_output = _skip_system_profiler
+"""
+
+_PLOTTING_IMPORTS = _SKIP_FONT_PROFILER + """\
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+"""
+
+
+def uses_plotting(code: str) -> bool:
+    """Matplotlib is slow to import, so only load it for code that needs it."""
+    for node in ast.walk(ast.parse(code)):
+        if isinstance(node, ast.Name) and node.id == "plt":
+            return True
+        if isinstance(node, ast.Import) and any(a.name.split(".")[0] == "matplotlib" for a in node.names):
+            return True
+        if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "matplotlib":
+            return True
+    return False
+
+
+def matplotlib_cache_dir() -> Path:
+    """A font cache shared between runs, so fonts are only scanned once per machine."""
+    path = Path(tempfile.gettempdir()) / f"analyst_agent_matplotlib_{os.getuid()}"
+    path.mkdir(mode=0o700, exist_ok=True)
+    return path
+
+
+def _prepare_font_cache(cache_dir: Path) -> None:
+    """Build the font cache once, outside the sandbox's CPU limit and timeout."""
+    if list(cache_dir.glob("fontlist-*.json")):
+        return
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(cache_dir),
+           "MPLBACKEND": "Agg", "MPLCONFIGDIR": str(cache_dir)}
+    script = _SKIP_FONT_PROFILER + "import matplotlib.font_manager\n"
+    try:
+        subprocess.run([sys.executable, "-I", "-c", script], env=env, cwd=cache_dir,
+                       capture_output=True, timeout=180, check=False)
+    except subprocess.TimeoutExpired:
+        pass  # The sandboxed run will report its own timeout.
+
+
 _BOOTSTRAP = """\
 import resource, sys
 def _limit(kind, value):
@@ -91,10 +144,7 @@ _limit(resource.RLIMIT_CPU, {cpu})
 _limit(resource.RLIMIT_AS, {memory})
 _limit(resource.RLIMIT_FSIZE, 50 * 1024 * 1024)
 import pandas as pd, numpy as np
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-frames = {{}}
+{plotting}frames = {{}}
 _name = None
 for _name in {names!r}:
     frames[_name] = pd.read_pickle(_name + ".pkl")
@@ -129,15 +179,20 @@ def run_python(
             if not name.isidentifier():
                 raise CodeRejected(f"Invalid frame name {name!r}.")
             frame.to_pickle(tmp_path / f"{name}.pkl")
+        plotting = uses_plotting(code)
+        mpl_dir = matplotlib_cache_dir() if plotting else tmp_path
+        if plotting:
+            _prepare_font_cache(mpl_dir)
         bootstrap = _BOOTSTRAP.format(
-            cpu=cpu_s, memory=memory_mb * 1024 * 1024, names=sorted(frames)
+            cpu=cpu_s, memory=memory_mb * 1024 * 1024, names=sorted(frames),
+            plotting=_PLOTTING_IMPORTS if plotting else "",
         )
         script = tmp_path / "_analysis.py"
         script.write_text(bootstrap + "\n" + code, encoding="utf-8")
         env = {
             "PATH": os.environ.get("PATH", ""),
             "MPLBACKEND": "Agg",
-            "MPLCONFIGDIR": str(tmp_path),
+            "MPLCONFIGDIR": str(mpl_dir),
             "HOME": str(tmp_path),
             "OPENBLAS_NUM_THREADS": "1",
             "OMP_NUM_THREADS": "1",

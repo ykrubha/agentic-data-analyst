@@ -6,7 +6,7 @@ import argparse
 import json
 import sys
 
-from .agent import DataAnalystAgent, format_trace
+from .agent import AgentConfig, DataAnalystAgent, format_trace
 from .llm import LLMError, make_provider
 
 
@@ -17,6 +17,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--provider", default="anthropic", choices=["anthropic", "openai"])
     parser.add_argument("--model", default=None)
     parser.add_argument("--output-dir", default="outputs")
+    parser.add_argument("--max-seconds", type=float, default=180.0,
+                        help="Time limit for the question. Raise this for slower local models.")
     parser.add_argument("--trace", action="store_true", help="Print every tool call.")
     parser.add_argument("--json", action="store_true", help="Print the full result as JSON.")
     args = parser.parse_args(argv)
@@ -27,7 +29,9 @@ def main(argv: list[str] | None = None) -> int:
         print(err, file=sys.stderr)
         return 2
 
-    result = DataAnalystAgent(provider, args.database, output_dir=args.output_dir).run(args.question)
+    agent = DataAnalystAgent(provider, args.database, output_dir=args.output_dir,
+                             config=AgentConfig(max_seconds=args.max_seconds))
+    result = agent.run(args.question)
     if args.json:
         print(json.dumps(result.to_dict(), indent=2, default=str))
         return 0 if result.status == "answered" else 1

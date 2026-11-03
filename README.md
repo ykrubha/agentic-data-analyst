@@ -49,7 +49,7 @@ Design choices:
 
 The attack list is my own, so this is a regression suite rather than a security audit. The one parser miss is why the second layer exists. Both the attacks and the results are in [`eval/guard_benchmark.py`](eval/guard_benchmark.py) and [`results/guard_benchmark.json`](results/guard_benchmark.json).
 
-### Agent accuracy (run this with your own API key)
+### Agent accuracy (run this with a model of your choice)
 
 **This benchmark has not been run against a live model yet, so no accuracy number is claimed.** The harness and adapters are tested with scripted responses and a fake HTTP server, which proves the plumbing but not model performance.
 
@@ -58,7 +58,17 @@ export ANTHROPIC_API_KEY=...
 python -m eval.run_eval --provider anthropic --model claude-sonnet-5-5
 ```
 
-This writes `results/benchmark.md` with the table below filled in, and `results/benchmark.json` with a full trace per question.
+Or run it for free on your own machine with [Ollama](https://ollama.com), using a model that supports tool calling:
+
+```bash
+ollama pull qwen3:8b
+printf 'FROM qwen3:8b\nPARAMETER num_ctx 16384\n' > /tmp/Modelfile
+ollama create analyst-model -f /tmp/Modelfile
+export OPENAI_BASE_URL=http://localhost:11434/v1
+python -m eval.run_eval --provider openai --model analyst-model --max-seconds 600
+```
+
+Either way, this writes `results/benchmark.md` with the table below filled in, and `results/benchmark.json` with a full trace per question. The table records which model produced the scores, and a small local model will likely score lower than a large hosted one.
 
 | Category | Questions | What it tests |
 |---|---:|---|
@@ -94,7 +104,7 @@ analyst-agent "What was the revenue trend by year? Save a chart." --trace
 | Python AST allowlist | Non-analysis imports, `eval`/`open`, private attributes, pandas file I/O |
 | Subprocess with rlimits and a clean environment | Runaway CPU or memory, and leaking API keys to generated code |
 
-**Known limit:** static checks on Python can be bypassed by a determined attacker, so the Python sandbox is defence in depth, not a security boundary. A multi-tenant deployment should also run it in a container or gVisor with no network.
+**Known limits:** the memory limit uses `RLIMIT_AS`, which Linux enforces and macOS doesn't. On a Mac, generated code is still bound by the CPU limit and timeout, but not by a memory cap, so deploy on Linux. Also, static checks on Python can be bypassed by a determined attacker, so the Python sandbox is defence in depth, not a security boundary. A multi-tenant deployment should also run it in a container or gVisor with no network.
 
 ## Project layout
 

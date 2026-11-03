@@ -1,9 +1,10 @@
 import os
+import sys
 
 import pandas as pd
 import pytest
 
-from analyst_agent.sandbox import CodeRejected, check_code, run_python
+from analyst_agent.sandbox import CodeRejected, check_code, run_python, uses_plotting
 from analyst_agent.sql_guard import ReadOnlyDatabase, SqlRejected, validate_sql
 from eval.guard_benchmark import ATTACKS, run as guard_run
 
@@ -69,6 +70,14 @@ def test_unsafe_code_is_rejected(code):
         check_code(code)
 
 
+def test_matplotlib_only_loads_when_needed():
+    assert run_python("print('plt' in dir())").stdout.strip() == "False"
+    assert uses_plotting("plt.plot([1])")
+    assert uses_plotting("import matplotlib.pyplot as p")
+    assert uses_plotting("from matplotlib import pyplot")
+    assert not uses_plotting("print(1)")
+
+
 def test_sandbox_returns_stdout_and_uses_frames():
     frames = {"df": pd.DataFrame({"x": [1, 2, 3]})}
     result = run_python("print(df['x'].sum())", frames=frames)
@@ -85,9 +94,14 @@ def test_sandbox_kills_infinite_loop():
     assert not result.ok
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="RLIMIT_AS is not enforced on macOS, so this limit only applies on Linux. See the README.",
+)
 def test_sandbox_enforces_memory_limit():
     result = run_python("x = bytearray(4 * 1024 ** 3)\nprint('allocated')", memory_mb=800)
     assert not result.ok and "allocated" not in result.stdout
+    assert "MemoryError" in result.stderr
 
 
 def test_sandbox_hides_environment(monkeypatch):

@@ -1,6 +1,7 @@
 """Run the benchmark against a real LLM and write results for the README.
 
     python -m eval.run_eval --provider anthropic --model claude-sonnet-5-5
+    python -m eval.run_eval --provider openai --model analyst-model --max-seconds 600
 
 Writes results/benchmark.json and results/benchmark.md. Per-question traces go in
 results/benchmark.json so each score can be audited.
@@ -105,6 +106,8 @@ def main() -> int:
     parser.add_argument("--database", default="data/chinook.sqlite")
     parser.add_argument("--out", default="results")
     parser.add_argument("--only", default=None, help="Comma-separated question ids.")
+    parser.add_argument("--max-seconds", type=float, default=180.0,
+                        help="Time limit per question. Raise this for slower local models.")
     args = parser.parse_args()
 
     questions = QUESTIONS
@@ -113,7 +116,8 @@ def main() -> int:
         questions = [q for q in QUESTIONS if q.id in wanted]
 
     started = time.monotonic()
-    summary = evaluate(make_provider(args.provider, args.model), args.database, questions)
+    summary = evaluate(make_provider(args.provider, args.model), args.database, questions,
+                       config=AgentConfig(max_seconds=args.max_seconds))
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     (out / "benchmark.json").write_text(json.dumps(summary, indent=2, default=str))

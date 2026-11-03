@@ -86,7 +86,7 @@ class AnthropicProvider:
             raise LLMError("Set ANTHROPIC_API_KEY to use the anthropic provider.")
         self.url = base_url.rstrip("/") + "/v1/messages"
         self.max_tokens = max_tokens
-        self.client = client or httpx.Client(timeout=120)
+        self.client = client or httpx.Client(timeout=300)
 
     def complete(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
         body = {
@@ -156,7 +156,7 @@ class OpenAICompatibleProvider:
         base = base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
         self.url = base.rstrip("/") + "/chat/completions"
         self.max_tokens = max_tokens
-        self.client = client or httpx.Client(timeout=120)
+        self.client = client or httpx.Client(timeout=300)
 
     def complete(self, system: str, messages: list[dict], tools: list[dict]) -> LLMResponse:
         body = {
