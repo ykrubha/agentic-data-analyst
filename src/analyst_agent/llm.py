@@ -25,6 +25,8 @@ class ToolCall:
     id: str
     name: str
     arguments: dict
+    # Opaque provider data that must be sent back unchanged, such as Gemini 3 thought signatures.
+    extra_content: dict | None = None
 
 
 @dataclass
@@ -184,7 +186,9 @@ class OpenAICompatibleProvider:
             except json.JSONDecodeError:
                 # Pass malformed JSON to the executor, which reports it back to the model.
                 arguments = {"__malformed_arguments__": raw}
-            result.tool_calls.append(ToolCall(call["id"], call["function"]["name"], arguments))
+            result.tool_calls.append(ToolCall(
+                call["id"], call["function"]["name"], arguments, call.get("extra_content")
+            ))
         return result
 
     @staticmethod
@@ -198,7 +202,8 @@ class OpenAICompatibleProvider:
                 if message.get("tool_calls"):
                     entry["tool_calls"] = [
                         {"id": c.id, "type": "function",
-                         "function": {"name": c.name, "arguments": json.dumps(c.arguments)}}
+                         "function": {"name": c.name, "arguments": json.dumps(c.arguments)},
+                         **({"extra_content": c.extra_content} if c.extra_content else {})}
                         for c in message["tool_calls"]
                     ]
                 wire.append(entry)

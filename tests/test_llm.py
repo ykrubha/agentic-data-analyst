@@ -99,6 +99,31 @@ def test_openai_reasoning_effort_is_only_sent_when_set():
     assert "reasoning_effort" not in bodies[1]
 
 
+def test_openai_extra_content_round_trips_unchanged():
+    signature = {"google": {"thought_signature": "abc123"}}
+    bodies = []
+
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"tool_calls": [
+            {"id": "c1", "type": "function", "extra_content": signature,
+             "function": {"name": "list_tables", "arguments": "{}"}},
+            {"id": "c2", "type": "function",
+             "function": {"name": "list_tables", "arguments": "{}"}},
+        ]}}]})
+
+    provider = OpenAICompatibleProvider(model="m", base_url="http://x/v1", client=client(handler))
+    calls = provider.complete("s", [{"role": "user", "content": "q"}], []).tool_calls
+    assert calls[0].extra_content == signature
+    provider.complete("s", [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "", "tool_calls": calls},
+    ], [])
+    sent = bodies[1]["messages"][2]["tool_calls"]
+    assert sent[0]["extra_content"] == signature
+    assert "extra_content" not in sent[1]
+
+
 def test_openai_malformed_arguments_do_not_crash():
     def handler(request):
         return httpx.Response(200, json={"choices": [{"message": {"tool_calls": [
