@@ -28,7 +28,8 @@ Rules:
 answerable=false and value=null.
 - If the database does not contain what the question needs, do not estimate. Call final_answer \
 with answerable=false and value=null, and say what is missing.
-- Give value in the form the question asks for. Round only if asked. Record interpretation choices \
+- value must be the thing the question asks for: a name for "which", a number for "how much". \
+Supporting figures go in answer, not value. Round only if asked. Record interpretation choices \
 in assumptions.
 """
 

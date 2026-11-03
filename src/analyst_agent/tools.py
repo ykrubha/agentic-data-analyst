@@ -73,9 +73,10 @@ TOOL_SCHEMAS = [
                     "type": ["string", "number", "array", "null"],
                     "items": {"type": ["string", "number"]},
                     "description": (
-                        "The machine-readable result: a number, a string, or a list of them, in "
-                        "the order the question asks for. Use null if the question cannot be "
-                        "answered from this data."
+                        "Exactly what the question asks for, with nothing extra: a number, a "
+                        "string, or a list of them in the order asked. For 'which genre' give the "
+                        "genre name, not its revenue. For 'how much' give the number. Use null if "
+                        "the question cannot be answered from this data."
                     ),
                 },
                 "answerable": {
