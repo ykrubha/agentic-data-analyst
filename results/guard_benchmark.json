@@ -1,0 +1,14 @@
+{
+  "attacks": 37,
+  "blocked_at_parser": 36,
+  "blocked_at_engine": [
+    "SELECT * FROM pragma_table_info('Customer')"
+  ],
+  "escaped": [],
+  "engine_only_attempted": 34,
+  "engine_only_blocked": 34,
+  "engine_only_escaped": [],
+  "gold_queries": 32,
+  "false_rejections": [],
+  "database_file_unchanged": true
+}
