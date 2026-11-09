@@ -1,10 +1,16 @@
 # Agentic AI Data Analyst
 
+[![tests](https://github.com/ykrubha/agentic-data-analyst/actions/workflows/tests.yml/badge.svg)](https://github.com/ykrubha/agentic-data-analyst/actions/workflows/tests.yml)
+
 An agent that answers business questions by writing and running its own SQL and Python. It uses native LLM tool calling: the model inspects the schema, queries the data, reads any errors, fixes its own mistakes, and returns a structured answer that a benchmark can score.
 
 ```
 $ analyst-agent "Which genre generated the most revenue, and how concentrated is revenue across genres?" --trace
 ```
+
+![The agent recovering from a blocked import, then answering correctly](assets/agent_demo.gif)
+
+*A replay of one recorded benchmark run with `gemini-3.5-flash-lite`. The sandbox blocks the model's attempt to import `sqlite3`, and it switches to the allowed tools and answers correctly. Long lines are trimmed.*
 
 ## How it works
 
